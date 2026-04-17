@@ -1,0 +1,81 @@
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-openresty-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve latest upstream OpenResty version
+        id: detect
+        env:
+          TAG_REGEX: "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+-alpine-fat$"
+        run: |
+          set -euo pipefail
+
+          tags=$(
+            for page in 1 2 3; do
+              curl -fsSL "https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&page=${page}" \
+                | jq -r '.results[].name'
+            done
+          )
+
+          latest="$(printf '%s\n' "${tags}" | grep -E "${TAG_REGEX}" | sed 's/-alpine-fat$//' | sort -V | tail -n1)"
+
+          if [ -z "${latest}" ]; then
+            echo "Could not resolve latest matching OpenResty tag."
+            exit 1
+          fi
+
+          current="$(jq -r '.openresty' versions.json)"
+
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+
+          if [ "${current}" = "${latest}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update tracked version files
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          latest="${{ steps.detect.outputs.latest }}"
+
+          jq --arg v "${latest}" '.openresty = $v' versions.json > versions.json.tmp
+          mv versions.json.tmp versions.json
+
+          sed -i -E "s/^ARG OPENRESTY_VERSION=.*/ARG OPENRESTY_VERSION=${latest}/" Dockerfile
+
+      - name: Create pull request for version bump
+        if: steps.detect.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/openresty-version-sync
+          delete-branch: true
+          commit-message: "chore: bump OpenResty to ${{ steps.detect.outputs.latest }}"
+          title: "chore: bump OpenResty to ${{ steps.detect.outputs.latest }}"
+          body: |
+            Automated OpenResty upstream sync.
+
+            - Previous: `${{ steps.detect.outputs.current }}`
+            - New: `${{ steps.detect.outputs.latest }}`
+
+            This PR updates:
+            - `versions.json`
+            - `Dockerfile` (`ARG OPENRESTY_VERSION`)
+
+            After merge, the publish workflow builds and pushes the new image tag.
