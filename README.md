@@ -12,13 +12,21 @@ This repository builds and publishes a container image that is intended to be us
 ## What you get
 
 - Multi-stage Docker build that compiles dynamic modules against the matching nginx version inside OpenResty.
-- Runtime image based on `openresty/openresty:<version>-alpine`.
+- Runtime image based on `openresty/openresty:<openresty-tag>-<variant>`.
 - Sensible default compression settings in `container/nginx/conf.d/10-compression-defaults.conf`.
+
+## Published tags
+
+Images are published with OpenResty-style tags per variant:
+
+- `<openresty-tag>-<variant>` (example: `1.29.2.3-alpine-fat`)
+- `<variant>` floating tag on the default branch (example: `alpine`, `bookworm-fat`)
+- `latest` (tracks `alpine-fat`)
 
 ## Use as a base image
 
 ```dockerfile
-FROM ghcr.io/<owner>/<repo>:latest
+FROM ghcr.io/ruakij/openresty-br-zstd:latest
 
 # Add your own host/app config
 COPY ./nginx/conf.d/ /etc/nginx/conf.d/

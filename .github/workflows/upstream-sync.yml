@@ -19,7 +19,7 @@ jobs:
       - name: Resolve latest upstream OpenResty version
         id: detect
         env:
-          TAG_REGEX: "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+-alpine-fat$"
+          TAG_REGEX: "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9]+)?-alpine-fat$"
         run: |
           set -euo pipefail
 
@@ -58,7 +58,7 @@ jobs:
           jq --arg v "${latest}" '.openresty = $v' versions.json > versions.json.tmp
           mv versions.json.tmp versions.json
 
-          sed -i -E "s/^ARG OPENRESTY_VERSION=.*/ARG OPENRESTY_VERSION=${latest}/" Dockerfile
+          sed -i -E "s/^ARG OPENRESTY_BASE_TAG=.*/ARG OPENRESTY_BASE_TAG=${latest}/" Dockerfile
 
       - name: Create pull request for version bump
         if: steps.detect.outputs.changed == 'true'
@@ -76,6 +76,6 @@ jobs:
 
             This PR updates:
             - `versions.json`
-            - `Dockerfile` (`ARG OPENRESTY_VERSION`)
+            - `Dockerfile` (`ARG OPENRESTY_BASE_TAG`)
 
             After merge, the publish workflow builds and pushes the new image tag.
