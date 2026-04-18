@@ -1,4 +1,4 @@
-ARG OPENRESTY_BASE_TAG=1.29.2.3
+ARG OPENRESTY_BASE_TAG=1.29.2.3-3
 ARG OPENRESTY_VARIANT=alpine-fat
 
 # Stage 1: Build Brotli/Zstd modules compatible with the nginx version
