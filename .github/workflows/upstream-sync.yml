@@ -5,6 +5,10 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: upstream-sync-openresty-version
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
@@ -14,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve latest upstream OpenResty version
         id: detect
@@ -62,8 +66,9 @@ jobs:
 
       - name: Create pull request for version bump
         if: steps.detect.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
+          token: ${{ secrets.OPENRESTY_SYNC_PR_TOKEN != '' && secrets.OPENRESTY_SYNC_PR_TOKEN || github.token }}
           branch: automation/openresty-version-sync
           delete-branch: true
           commit-message: "chore: bump OpenResty to ${{ steps.detect.outputs.latest }}"

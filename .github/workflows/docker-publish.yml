@@ -32,7 +32,7 @@ jobs:
       variants: ${{ steps.config.outputs.variants }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Read configured OpenResty tags
         id: config
@@ -64,7 +64,7 @@ jobs:
         variant: ${{ fromJson(needs.prepare.outputs.variants) }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
