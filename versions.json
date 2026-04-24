@@ -1,5 +1,5 @@
 {
-  "openresty": "1.29.2.3-3",
+  "openresty": "1.29.2.3-4",
   "variants": [
     "alpine",
     "alpine-slim",
