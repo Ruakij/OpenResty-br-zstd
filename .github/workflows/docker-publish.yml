@@ -66,6 +66,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Compute build timestamp
+        id: timestamp
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -99,6 +103,9 @@ jobs:
           build-args: |
             OPENRESTY_BASE_TAG=${{ needs.prepare.outputs.openresty }}
             OPENRESTY_VARIANT=${{ matrix.variant }}
+            VERSION=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.timestamp.outputs.created }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

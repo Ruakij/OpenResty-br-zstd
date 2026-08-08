@@ -71,6 +71,7 @@ RUN ./configure \
 # Stage 2: OpenResty runtime with compression modules
 FROM openresty/openresty:${OPENRESTY_BASE_TAG}-${OPENRESTY_VARIANT} AS runtime
 
+ARG OPENRESTY_BASE_TAG
 ARG OPENRESTY_VARIANT
 
 # Runtime libs required by dynamic modules
@@ -98,6 +99,19 @@ COPY --from=openresty-mod-builder /build/nginx/objs/ngx_http_zstd_static_module.
 # Copy OpenResty/nginx configuration with sensible compression defaults
 COPY ./container/nginx/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
 COPY ./container/nginx/conf.d/ /etc/nginx/conf.d/
+
+ARG VERSION=""
+ARG REVISION=""
+ARG CREATED=""
+
+LABEL org.opencontainers.image.title="OpenResty-br-zstd" \
+      org.opencontainers.image.description="OpenResty with Brotli and Zstd dynamic compression modules" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/Ruakij/OpenResty-br-zstd" \
+      org.opencontainers.image.base.name="openresty/openresty:${OPENRESTY_BASE_TAG}-${OPENRESTY_VARIANT}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
 
 EXPOSE 80
 
