@@ -65,6 +65,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute git describe
+        id: describe
+        run: echo "sha=$(git describe --tags --always --long)" >> "$GITHUB_OUTPUT"
 
       - name: Compute build timestamp
         id: timestamp
@@ -91,6 +97,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
+            type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}--rev-${{ steps.describe.outputs.sha }}
             type=raw,value=${{ matrix.variant }},enable=${{ github.ref_name == github.event.repository.default_branch }}
             type=raw,value=latest,enable=${{ github.ref_name == github.event.repository.default_branch && matrix.variant == 'alpine' }}
 
