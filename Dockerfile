@@ -112,7 +112,3 @@ LABEL org.opencontainers.image.title="OpenResty-br-zstd" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.created="${CREATED}"
-
-EXPOSE 80
-
-CMD ["openresty", "-g", "daemon off;"]
