@@ -3,15 +3,9 @@ name: docker-publish
 on:
   push:
     branches:
-      - main
-      - master
+      - "**"
     tags:
       - "v*"
-    paths:
-      - "Dockerfile"
-      - "container/**"
-      - "versions.json"
-      - ".github/workflows/docker-publish.yml"
   pull_request:
     paths:
       - "Dockerfile"
@@ -77,13 +71,19 @@ jobs:
         run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
+
+      - name: Compute lowercase image name
+        id: image
+        run: |
+          image_name="$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
+        if: github.ref_type == 'tag'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -92,9 +92,9 @@ jobs:
 
       - name: Compute Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
             type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}--rev-${{ steps.describe.outputs.sha }}
@@ -102,19 +102,68 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_name == github.event.repository.default_branch && matrix.variant == 'alpine' }}
 
       - name: Build and optionally push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.ref_type == 'tag' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           build-args: |
             OPENRESTY_BASE_TAG=${{ needs.prepare.outputs.openresty }}
             OPENRESTY_VARIANT=${{ matrix.variant }}
             VERSION=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
             REVISION=${{ github.sha }}
             CREATED=${{ steps.timestamp.outputs.created }}
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ github.ref_type == 'tag' }}
+          load: ${{ github.ref_type != 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Validate OpenResty configuration
+        if: github.ref_type != 'tag'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm "${IMAGE}" openresty -t
+
+      - name: Start and validate container
+        if: github.ref_type != 'tag'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
+          CONTAINER: openresty-br-zstd-smoke-${{ matrix.variant }}
+        run: |
+          set -Eeuo pipefail
+
+          cleanup() {
+            exit_code=$?
+            if [ "${exit_code}" -ne 0 ] && docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
+              echo "Container logs:"
+              docker logs "${CONTAINER}" || true
+              echo "Container state:"
+              docker inspect --format '{{json .State}}' "${CONTAINER}" || true
+            fi
+            docker rm --force "${CONTAINER}" >/dev/null 2>&1 || true
+            exit "${exit_code}"
+          }
+          trap cleanup EXIT
+
+          docker run --detach \
+            --name "${CONTAINER}" \
+            "${IMAGE}" >/dev/null
+
+          sleep 2
+          state="$(docker inspect --format '{{.State.Status}}' "${CONTAINER}")"
+          if [ "${state}" != "running" ]; then
+            echo "Container is not running: ${state}"
+            exit 1
+          fi
+
+          logs="$(docker logs "${CONTAINER}" 2>&1)"
+          printf '%s\n' "${logs}"
+          if printf '%s\n' "${logs}" | grep -Eiq '\[(warn|error|crit|alert|emerg)\]'; then
+            echo "Nginx warning or error severity found in container logs."
+            exit 1
+          fi
