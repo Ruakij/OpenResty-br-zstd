@@ -13,6 +13,12 @@ on:
       - "versions.json"
       - ".github/workflows/docker-publish.yml"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build and smoke-test instead of the caller ref
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -27,6 +33,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Read configured OpenResty tags
         id: config
@@ -60,6 +68,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Compute git describe
