@@ -29,6 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       openresty: ${{ steps.config.outputs.openresty }}
+      openresty-release: ${{ steps.config.outputs.openresty-release }}
+      nginx: ${{ steps.config.outputs.nginx }}
+      nginx-minor: ${{ steps.config.outputs.nginx-minor }}
       variants: ${{ steps.config.outputs.variants }}
     steps:
       - name: Check out repository
@@ -54,8 +57,19 @@ jobs:
             exit 1
           fi
 
-          echo "openresty=${openresty}" >> "$GITHUB_OUTPUT"
-          echo "variants=${variants}" >> "$GITHUB_OUTPUT"
+          # <nginx major.minor.patch>.<openresty patch>[-<image revision>]
+          if ! [[ "${openresty}" =~ ^(([0-9]+\.[0-9]+)\.[0-9]+)\.[0-9]+(-[0-9]+)?$ ]]; then
+            echo "versions.json .openresty has an unexpected format: ${openresty}"
+            exit 1
+          fi
+
+          {
+            echo "openresty=${openresty}"
+            echo "openresty-release=${openresty%-*}"
+            echo "nginx=${BASH_REMATCH[1]}"
+            echo "nginx-minor=${BASH_REMATCH[2]}"
+            echo "variants=${variants}"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     runs-on: ubuntu-latest
@@ -69,11 +83,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
-          fetch-depth: 0
 
-      - name: Compute git describe
-        id: describe
-        run: echo "sha=$(git describe --tags --always --long)" >> "$GITHUB_OUTPUT"
+      - name: Resolve built commit
+        id: commit
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Compute build timestamp
         id: timestamp
@@ -106,9 +121,12 @@ jobs:
           images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
-            type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}--rev-${{ steps.describe.outputs.sha }}
-            type=raw,value=${{ matrix.variant }},enable=${{ github.ref_name == github.event.repository.default_branch }}
-            type=raw,value=latest,enable=${{ github.ref_name == github.event.repository.default_branch && matrix.variant == 'alpine' }}
+            type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}--rev-${{ steps.commit.outputs.short }}
+            type=raw,value=${{ needs.prepare.outputs.openresty-release }}-${{ matrix.variant }},enable=${{ needs.prepare.outputs.openresty-release != needs.prepare.outputs.openresty }}
+            type=raw,value=${{ needs.prepare.outputs.nginx }}-${{ matrix.variant }}
+            type=raw,value=${{ needs.prepare.outputs.nginx-minor }}-${{ matrix.variant }}
+            type=raw,value=${{ matrix.variant }}
+            type=raw,value=latest,enable=${{ matrix.variant == 'alpine' }}
 
       - name: Build and optionally push image
         uses: docker/build-push-action@v7
@@ -120,7 +138,7 @@ jobs:
             OPENRESTY_BASE_TAG=${{ needs.prepare.outputs.openresty }}
             OPENRESTY_VARIANT=${{ matrix.variant }}
             VERSION=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
-            REVISION=${{ github.sha }}
+            REVISION=${{ steps.commit.outputs.sha }}
             CREATED=${{ steps.timestamp.outputs.created }}
           push: ${{ github.ref_type == 'tag' }}
           load: ${{ github.ref_type != 'tag' }}
