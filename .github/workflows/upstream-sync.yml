@@ -35,12 +35,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          tags=$(
-            for page in 1 2 3; do
-              curl -fsSL "https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&page=${page}" \
-                | jq -r '.results[].name'
-            done
-          )
+          # The name filter is applied by Docker Hub, so the result does not depend on
+          # how far down the last_updated ordering the newest version sits.
+          tags=""
+          url="https://hub.docker.com/v2/repositories/openresty/openresty/tags?page_size=100&name=-alpine-fat"
+          while [ -n "${url}" ] && [ "${url}" != "null" ]; do
+            page="$(curl -fsSL "${url}")"
+            tags+="$(jq -r '.results[].name' <<<"${page}")"$'\n'
+            url="$(jq -r '.next' <<<"${page}")"
+          done
 
           latest="$(printf '%s\n' "${tags}" | grep -E "${TAG_REGEX}" | sed 's/-alpine-fat$//' | sort -V | tail -n1)"
 
