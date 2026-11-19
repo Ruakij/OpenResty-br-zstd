@@ -6,17 +6,22 @@ on:
       - "**"
     tags:
       - "v*"
+      - "nginx-v*"
   pull_request:
     paths:
-      - "Dockerfile"
-      - "container/**"
-      - "versions.json"
+      - "openresty/**"
+      - "nginx/**"
+      - "common/**"
       - ".github/workflows/docker-publish.yml"
   workflow_dispatch:
   workflow_call:
     inputs:
       ref:
         description: Commit to build and smoke-test instead of the caller ref
+        type: string
+        required: false
+      flavors:
+        description: JSON array of the flavors to build (openresty, nginx); empty builds both
         type: string
         required: false
 
@@ -28,56 +33,173 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      openresty: ${{ steps.config.outputs.openresty }}
-      openresty-release: ${{ steps.config.outputs.openresty-release }}
-      nginx: ${{ steps.config.outputs.nginx }}
-      nginx-minor: ${{ steps.config.outputs.nginx-minor }}
-      variants: ${{ steps.config.outputs.variants }}
+      matrix: ${{ steps.config.outputs.matrix }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Read configured OpenResty tags
+      - name: Generate build matrix
         id: config
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          FLAVORS: ${{ inputs.flavors }}
         run: |
           set -euo pipefail
 
-          openresty="$(jq -r '.openresty' versions.json)"
-          variants="$(jq -c '.variants // ["alpine-fat"]' versions.json)"
+          openresty="$(jq -r '.openresty' openresty/versions.json)"
+          openresty_variants="$(jq -c '.variants // ["alpine-fat"]' openresty/versions.json)"
+          nginx="$(jq -r '.nginx' nginx/versions.json)"
+          nginx_variants="$(jq -c '.variants // ["alpine"]' nginx/versions.json)"
 
           if [ -z "${openresty}" ] || [ "${openresty}" = "null" ]; then
-            echo "versions.json .openresty must be set."
+            echo "openresty/versions.json .openresty must be set."
             exit 1
           fi
 
-          if [ "${variants}" = "null" ] || [ "${variants}" = "[]" ]; then
-            echo "versions.json .variants must contain at least one entry."
+          if [ "${openresty_variants}" = "null" ] || [ "${openresty_variants}" = "[]" ]; then
+            echo "openresty/versions.json .variants must contain at least one entry."
+            exit 1
+          fi
+
+          if [ -z "${nginx}" ] || [ "${nginx}" = "null" ]; then
+            echo "nginx/versions.json .nginx must be set."
+            exit 1
+          fi
+
+          if [ "${nginx_variants}" = "null" ] || [ "${nginx_variants}" = "[]" ]; then
+            echo "nginx/versions.json .variants must contain at least one entry."
             exit 1
           fi
 
           # <nginx major.minor.patch>.<openresty patch>[-<image revision>]
           if ! [[ "${openresty}" =~ ^(([0-9]+\.[0-9]+)\.[0-9]+)\.[0-9]+(-[0-9]+)?$ ]]; then
-            echo "versions.json .openresty has an unexpected format: ${openresty}"
+            echo "openresty/versions.json .openresty has an unexpected format: ${openresty}"
+            exit 1
+          fi
+          openresty_nginx="${BASH_REMATCH[1]}"
+          openresty_nginx_minor="${BASH_REMATCH[2]}"
+
+          if ! [[ "${nginx}" =~ ^([0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+            echo "nginx/versions.json .nginx has an unexpected format: ${nginx}"
+            exit 1
+          fi
+          nginx_minor="${BASH_REMATCH[1]}"
+
+          # A release tag publishes the flavor it belongs to and must name the version
+          # the flavor's versions.json holds at that commit; every other event builds the
+          # flavors input, or both.
+          flavors="${FLAVORS:-[\"openresty\",\"nginx\"]}"
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; . == "openresty" or . == "nginx")' <<<"${flavors}" >/dev/null; then
+            echo "flavors must be a non-empty JSON array of openresty and nginx: ${flavors}"
+            exit 1
+          fi
+          if [ "${REF_TYPE}" = "tag" ]; then
+            case "${REF_NAME}" in
+              nginx-v*)
+                flavors='["nginx"]'
+                expected="nginx-v${nginx}"
+                ;;
+              v*)
+                flavors='["openresty"]'
+                expected="v${openresty}"
+                ;;
+              *)
+                echo "Release tag ${REF_NAME} matches neither v* nor nginx-v*."
+                exit 1
+                ;;
+            esac
+            if [ "${REF_NAME}" != "${expected}" ]; then
+              echo "Release tag ${REF_NAME} does not match the version in versions.json (${expected})."
+              exit 1
+            fi
+          fi
+
+          matrix="$(jq -c \
+            --argjson flavors "${flavors}" \
+            --arg openresty "${openresty}" \
+            --arg openresty_release "${openresty%-*}" \
+            --arg openresty_nginx "${openresty_nginx}" \
+            --arg openresty_nginx_minor "${openresty_nginx_minor}" \
+            --argjson openresty_variants "${openresty_variants}" \
+            --arg nginx "${nginx}" \
+            --arg nginx_minor "${nginx_minor}" \
+            --argjson nginx_variants "${nginx_variants}" \
+            -n '
+              def suffix($profile): if $profile == "standard" then "" else "-" + $profile end;
+
+              def entry($flavor; $variant; $profile):
+                {
+                  openresty: {
+                    image: "openresty-br-zstd",
+                    file: "openresty/Dockerfile",
+                    title: "OpenResty-br-zstd",
+                    description: "OpenResty with Brotli and Zstd dynamic compression modules",
+                    base: $openresty,
+                    versions: [$openresty, $openresty_release, $openresty_nginx, $openresty_nginx_minor],
+                    build_args: ["OPENRESTY_BASE_TAG=" + $openresty, "OPENRESTY_VARIANT=" + $variant]
+                  },
+                  nginx: {
+                    image: "nginx-br-zstd",
+                    file: "nginx/Dockerfile",
+                    title: "nginx-br-zstd",
+                    description: "nginx with Brotli and Zstd dynamic compression modules",
+                    base: $nginx,
+                    versions: [$nginx, $nginx_minor],
+                    build_args: ["NGINX_VERSION=" + $nginx, "NGINX_VARIANT=" + $variant]
+                  }
+                }[$flavor] as $f
+                | ($variant + suffix($profile)) as $floating
+                | {
+                    flavor: $flavor,
+                    variant: $variant,
+                    profile: $profile,
+                    image: $f.image,
+                    file: $f.file,
+                    title: ($f.title + (if $profile == "standard" then "" else " (" + $profile + ")" end)),
+                    description: ($f.description + ({
+                      standard: "",
+                      unprivileged: ", running as non-root user nginx (uid 101) on port 8080",
+                      hardened: ", running as non-root user nginx (uid 101) on port 8080 without shell or package manager"
+                    }[$profile])),
+                    main: ($f.base + "-" + $floating),
+                    build_args: ($f.build_args | join("\n")),
+                    tags: (
+                      ([$f.base + "-" + $floating]
+                        + [$f.versions[] | . + "-" + $floating]
+                        + [$floating]
+                        + (if $variant == "alpine" and $profile != "standard" then [$profile] else [] end)
+                        + (if $variant == "alpine" and $profile == "standard" then ["latest"] else [] end))
+                      | reduce .[] as $tag ([]; if any(.[]; . == $tag) then . else . + [$tag] end)
+                      | map("type=raw,value=" + .) | join("\n"))
+                  };
+
+              [
+                $flavors[] as $flavor
+                | ({openresty: $openresty_variants, nginx: $nginx_variants}[$flavor])[] as $variant
+                | ["standard", "unprivileged", "hardened"][] as $profile
+                | select($profile != "hardened" or ($variant | startswith("alpine")))
+                | entry($flavor; $variant; $profile)
+              ]')"
+
+          if [ "${matrix}" = "[]" ]; then
+            echo "The build matrix is empty."
             exit 1
           fi
 
-          {
-            echo "openresty=${openresty}"
-            echo "openresty-release=${openresty%-*}"
-            echo "nginx=${BASH_REMATCH[1]}"
-            echo "nginx-minor=${BASH_REMATCH[2]}"
-            echo "variants=${variants}"
-          } >> "$GITHUB_OUTPUT"
+          echo "${matrix}" | jq .
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
   build:
+    name: ${{ matrix.image }} ${{ matrix.variant }} ${{ matrix.profile }}
     runs-on: ubuntu-latest
     needs: prepare
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJson(needs.prepare.outputs.variants) }}
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -102,8 +224,10 @@ jobs:
 
       - name: Compute lowercase image name
         id: image
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
         run: |
-          image_name="$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          image_name="$(printf '%s' "ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
           echo "name=${image_name}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
@@ -120,77 +244,39 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
-            type=raw,value=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}--rev-${{ steps.commit.outputs.short }}
-            type=raw,value=${{ needs.prepare.outputs.openresty-release }}-${{ matrix.variant }},enable=${{ needs.prepare.outputs.openresty-release != needs.prepare.outputs.openresty }}
-            type=raw,value=${{ needs.prepare.outputs.nginx }}-${{ matrix.variant }}
-            type=raw,value=${{ needs.prepare.outputs.nginx-minor }}-${{ matrix.variant }}
-            type=raw,value=${{ matrix.variant }}
-            type=raw,value=latest,enable=${{ matrix.variant == 'alpine' }}
+            ${{ matrix.tags }}
+            type=raw,value=${{ matrix.main }}--rev-${{ steps.commit.outputs.short }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
 
       - name: Build and optionally push image
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./Dockerfile
+          file: ./${{ matrix.file }}
+          target: ${{ matrix.profile }}
           platforms: ${{ github.ref_type == 'tag' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           build-args: |
-            OPENRESTY_BASE_TAG=${{ needs.prepare.outputs.openresty }}
-            OPENRESTY_VARIANT=${{ matrix.variant }}
-            VERSION=${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
+            ${{ matrix.build_args }}
+            VERSION=${{ matrix.main }}
             REVISION=${{ steps.commit.outputs.sha }}
             CREATED=${{ steps.timestamp.outputs.created }}
           push: ${{ github.ref_type == 'tag' }}
           load: ${{ github.ref_type != 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.flavor }}-${{ matrix.variant }}-${{ matrix.profile }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}-${{ matrix.variant }}-${{ matrix.profile }}
 
-      - name: Validate OpenResty configuration
+      - name: Validate nginx configuration
         if: github.ref_type != 'tag'
         env:
-          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
-        run: |
-          set -euo pipefail
-
-          docker run --rm "${IMAGE}" openresty -t
+          IMAGE: ${{ steps.image.outputs.name }}:${{ matrix.main }}
+        run: bash common/smoke-test.sh config "${IMAGE}" "${{ matrix.flavor }}" "${{ matrix.profile }}"
 
       - name: Start and validate container
         if: github.ref_type != 'tag'
         env:
-          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.openresty }}-${{ matrix.variant }}
-          CONTAINER: openresty-br-zstd-smoke-${{ matrix.variant }}
-        run: |
-          set -Eeuo pipefail
-
-          cleanup() {
-            exit_code=$?
-            if [ "${exit_code}" -ne 0 ] && docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
-              echo "Container logs:"
-              docker logs "${CONTAINER}" || true
-              echo "Container state:"
-              docker inspect --format '{{json .State}}' "${CONTAINER}" || true
-            fi
-            docker rm --force "${CONTAINER}" >/dev/null 2>&1 || true
-            exit "${exit_code}"
-          }
-          trap cleanup EXIT
-
-          docker run --detach \
-            --name "${CONTAINER}" \
-            "${IMAGE}" >/dev/null
-
-          sleep 2
-          state="$(docker inspect --format '{{.State.Status}}' "${CONTAINER}")"
-          if [ "${state}" != "running" ]; then
-            echo "Container is not running: ${state}"
-            exit 1
-          fi
-
-          logs="$(docker logs "${CONTAINER}" 2>&1)"
-          printf '%s\n' "${logs}"
-          if printf '%s\n' "${logs}" | grep -Eiq '\[(warn|error|crit|alert|emerg)\]'; then
-            echo "Nginx warning or error severity found in container logs."
-            exit 1
-          fi
+          IMAGE: ${{ steps.image.outputs.name }}:${{ matrix.main }}
+        run: bash common/smoke-test.sh start "${IMAGE}" "${{ matrix.flavor }}" "${{ matrix.profile }}"
