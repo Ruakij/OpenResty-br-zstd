@@ -145,7 +145,17 @@ jobs:
       HEAD_SHA: ${{ needs.sync-openresty-version.outputs.pr-head-sha }}
     steps:
       - name: Wait for pull request checks
-        run: gh pr checks "${PR}" --watch --interval 30
+        run: |
+          set -euo pipefail
+
+          # A pull request opened with GITHUB_TOKEN gets no checks, and gh pr checks fails
+          # on none; the test job has smoke-tested its head commit.
+          checks="$(gh pr view "${PR}" --json statusCheckRollup --jq '.statusCheckRollup | length')"
+          if [ "${checks}" = 0 ]; then
+            echo "Pull request ${PR} has no checks."
+            exit 0
+          fi
+          gh pr checks "${PR}" --watch --interval 30
 
       - name: Merge pull request
         run: gh pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}"
@@ -304,7 +314,17 @@ jobs:
       HEAD_SHA: ${{ needs.sync-nginx-version.outputs.pr-head-sha }}
     steps:
       - name: Wait for pull request checks
-        run: gh pr checks "${PR}" --watch --interval 30
+        run: |
+          set -euo pipefail
+
+          # A pull request opened with GITHUB_TOKEN gets no checks, and gh pr checks fails
+          # on none; the test job has smoke-tested its head commit.
+          checks="$(gh pr view "${PR}" --json statusCheckRollup --jq '.statusCheckRollup | length')"
+          if [ "${checks}" = 0 ]; then
+            echo "Pull request ${PR} has no checks."
+            exit 0
+          fi
+          gh pr checks "${PR}" --watch --interval 30
 
       - name: Merge pull request
         run: gh pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}"
