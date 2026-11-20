@@ -2,6 +2,11 @@ name: upstream-sync
 
 # Events caused by GITHUB_TOKEN (opened PR, merge push, tag push) start no other
 # workflows, so this workflow tests, merges and releases the bump itself.
+#
+# The OpenResty and nginx bumps are independent job chains. Each chain reads and edits
+# only the versions.json of its flavor, and a failure in one chain does not stop the
+# other. The workflow-level concurrency group queues whole runs, so a second run cannot
+# start while a chain is still testing or merging.
 
 on:
   schedule:
@@ -9,7 +14,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: upstream-sync-openresty-version
+  group: upstream-sync
   cancel-in-progress: false
 
 permissions: {}
@@ -52,7 +57,7 @@ jobs:
             exit 1
           fi
 
-          current="$(jq -r '.openresty' versions.json)"
+          current="$(jq -r '.openresty' openresty/versions.json)"
 
           echo "current=${current}" >> "$GITHUB_OUTPUT"
           echo "latest=${latest}" >> "$GITHUB_OUTPUT"
@@ -70,10 +75,10 @@ jobs:
 
           latest="${{ steps.detect.outputs.latest }}"
 
-          jq --arg v "${latest}" '.openresty = $v' versions.json > versions.json.tmp
-          mv versions.json.tmp versions.json
+          jq --arg v "${latest}" '.openresty = $v' openresty/versions.json > openresty/versions.json.tmp
+          mv openresty/versions.json.tmp openresty/versions.json
 
-          sed -i -E "s/^ARG OPENRESTY_BASE_TAG=.*/ARG OPENRESTY_BASE_TAG=${latest}/" Dockerfile
+          sed -i -E "s/^ARG OPENRESTY_BASE_TAG=.*/ARG OPENRESTY_BASE_TAG=${latest}/" openresty/Dockerfile
 
       - name: Create pull request for version bump
         id: pr
@@ -92,24 +97,26 @@ jobs:
             - New: `${{ steps.detect.outputs.latest }}`
 
             This PR updates:
-            - `versions.json`
-            - `Dockerfile` (`ARG OPENRESTY_BASE_TAG`)
+            - `openresty/versions.json`
+            - `openresty/Dockerfile` (`ARG OPENRESTY_BASE_TAG`)
 
             The upstream-sync workflow smoke-tests this PR, squash-merges it once all
             checks pass and releases `v${{ steps.detect.outputs.latest }}`.
 
   test:
     needs: sync-openresty-version
-    if: needs.sync-openresty-version.outputs.pr-head-sha != ''
+    if: ${{ !cancelled() && needs.sync-openresty-version.result == 'success' && needs.sync-openresty-version.outputs.pr-head-sha != '' }}
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/docker-publish.yml
     with:
       ref: ${{ needs.sync-openresty-version.outputs.pr-head-sha }}
+      flavors: '["openresty"]'
 
   merge:
     needs: [sync-openresty-version, test]
+    if: ${{ !cancelled() && needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -132,7 +139,7 @@ jobs:
   # by hand gets released by the next run as well.
   release:
     needs: [sync-openresty-version, merge]
-    if: ${{ !cancelled() && !failure() }}
+    if: ${{ !cancelled() && needs.sync-openresty-version.result == 'success' && needs.merge.result != 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -150,7 +157,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          tag="v$(jq -r '.openresty' versions.json)"
+          tag="v$(jq -r '.openresty' openresty/versions.json)"
 
           if gh release view "${tag}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
             echo "${tag} already exists."
@@ -158,4 +165,164 @@ jobs:
           fi
 
           gh release create "${tag}" --target "$(git rev-parse HEAD)" --title "${tag}" --generate-notes
+          gh workflow run docker-publish.yml --ref "${tag}"
+
+  sync-nginx-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      pr-number: ${{ steps.pr.outputs.pull-request-number }}
+      pr-head-sha: ${{ steps.pr.outputs.pull-request-head-sha }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve latest upstream nginx version
+        id: detect
+        env:
+          TAG_REGEX: "^[0-9]+\\.[0-9]+\\.[0-9]+-alpine$"
+        run: |
+          set -euo pipefail
+
+          # The name filter is applied by Docker Hub, so the result does not depend on
+          # how far down the last_updated ordering the newest version sits.
+          tags=""
+          url="https://hub.docker.com/v2/repositories/library/nginx/tags?page_size=100&name=-alpine"
+          while [ -n "${url}" ] && [ "${url}" != "null" ]; do
+            page="$(curl -fsSL "${url}")"
+            tags+="$(jq -r '.results[].name' <<<"${page}")"$'\n'
+            url="$(jq -r '.next' <<<"${page}")"
+          done
+
+          latest="$(printf '%s\n' "${tags}" | grep -E "${TAG_REGEX}" | sed 's/-alpine$//' | sort -V | tail -n1)"
+
+          if [ -z "${latest}" ]; then
+            echo "Could not resolve the latest nginx tag."
+            exit 1
+          fi
+
+          current="$(jq -r '.nginx' nginx/versions.json)"
+
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+
+          # The nginx project publishes the variants of a version one after the other.
+          # Wait until every configured variant exists; the next run retries.
+          for variant in $(jq -r '.variants[]' nginx/versions.json); do
+            status="$(curl -sSL -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/nginx/tags/${latest}-${variant}")"
+            if [ "${status}" = "404" ]; then
+              echo "::notice::nginx ${latest}-${variant} is not published yet, staying on ${current}."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "${status}" != "200" ]; then
+              echo "Unexpected HTTP status ${status} for nginx ${latest}-${variant}."
+              exit 1
+            fi
+          done
+
+          if [ "${current}" = "${latest}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update tracked version files
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          latest="${{ steps.detect.outputs.latest }}"
+
+          jq --arg v "${latest}" '.nginx = $v' nginx/versions.json > nginx/versions.json.tmp
+          mv nginx/versions.json.tmp nginx/versions.json
+
+      - name: Create pull request for version bump
+        id: pr
+        if: steps.detect.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.OPENRESTY_SYNC_PR_TOKEN != '' && secrets.OPENRESTY_SYNC_PR_TOKEN || github.token }}
+          branch: automation/nginx-version-sync
+          delete-branch: true
+          commit-message: "chore: bump nginx to ${{ steps.detect.outputs.latest }}"
+          title: "chore: bump nginx to ${{ steps.detect.outputs.latest }}"
+          body: |
+            Automated nginx upstream sync.
+
+            - Previous: `${{ steps.detect.outputs.current }}`
+            - New: `${{ steps.detect.outputs.latest }}`
+
+            This PR updates:
+            - `nginx/versions.json` (`.nginx`)
+
+            The upstream-sync workflow smoke-tests this PR, squash-merges it once all
+            checks pass and releases `nginx-v${{ steps.detect.outputs.latest }}`.
+
+  test-nginx:
+    needs: sync-nginx-version
+    if: ${{ !cancelled() && needs.sync-nginx-version.result == 'success' && needs.sync-nginx-version.outputs.pr-head-sha != '' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      ref: ${{ needs.sync-nginx-version.outputs.pr-head-sha }}
+      flavors: '["nginx"]'
+
+  merge-nginx:
+    needs: [sync-nginx-version, test-nginx]
+    if: ${{ !cancelled() && needs.test-nginx.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ needs.sync-nginx-version.outputs.pr-number }}
+      HEAD_SHA: ${{ needs.sync-nginx-version.outputs.pr-head-sha }}
+    steps:
+      - name: Wait for pull request checks
+        run: gh pr checks "${PR}" --watch --interval 30
+
+      - name: Merge pull request
+        run: gh pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}"
+
+  # Releases the version on main whenever its tag is missing, so a bump merged
+  # by hand gets released by the next run as well.
+  release-nginx:
+    needs: [sync-nginx-version, merge-nginx]
+    if: ${{ !cancelled() && needs.sync-nginx-version.result == 'success' && needs.merge-nginx.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Create release and publish images
+        run: |
+          set -euo pipefail
+
+          tag="nginx-v$(jq -r '.nginx' nginx/versions.json)"
+
+          if gh release view "${tag}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo "${tag} already exists."
+            exit 0
+          fi
+
+          # nginx releases must not take the Latest mark from the OpenResty releases.
+          gh release create "${tag}" --target "$(git rev-parse HEAD)" --title "${tag}" --generate-notes --latest=false
           gh workflow run docker-publish.yml --ref "${tag}"
