@@ -143,7 +143,7 @@ docker build -f nginx/Dockerfile --target hardened --build-arg NGINX_VERSION="$(
 bash common/smoke-test.sh start <image> <openresty|nginx> <standard|unprivileged|hardened>
 ```
 
-The workflow `upstream-sync` tracks the newest `X.Y.Z.W-alpine-fat` OpenResty tag and the newest `X.Y.Z-alpine` nginx tag, tests each bump in its own pull request, merges it and releases `v<openresty-tag>` or `nginx-v<nginx-version>`. The two bumps are independent job chains; each edits only the `versions.json` of its flavor, builds only its flavor, and the nginx bump waits until every configured variant of a version is published.
+The workflow `upstream-sync` tracks the newest `X.Y.Z.W-alpine-fat` OpenResty tag and the newest `X.Y.Z-alpine` nginx tag, tests each bump in its own pull request, merges it and releases `v<openresty-tag>` or `nginx-v<nginx-version>`. The two bumps are independent job chains; each edits only the `versions.json` of its flavor, builds only its flavor and waits until every configured variant of a version is published.
 
 ## License
 
