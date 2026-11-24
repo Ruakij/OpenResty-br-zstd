@@ -1,5 +1,5 @@
 {
-  "nginx": "1.31.9",
+  "nginx": "1.31.10",
   "variants": [
     "alpine",
     "alpine-slim"
