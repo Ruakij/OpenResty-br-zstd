@@ -1,7 +1,7 @@
 # OpenResty image with the profiles standard, unprivileged and hardened, selected with
 # --target. The build context is the repository root:
 #   docker build -f openresty/Dockerfile --target <profile> .
-ARG OPENRESTY_BASE_TAG=1.31.8.1-0
+ARG OPENRESTY_BASE_TAG=1.31.9.1-0
 ARG OPENRESTY_VARIANT=alpine
 
 # Stage 1: Build Brotli/Zstd modules compatible with the nginx version
